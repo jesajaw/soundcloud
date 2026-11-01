@@ -1,0 +1,16 @@
+:root { color-scheme: dark; --bg:#121212; --fg:#f2f2f2; --mut:#9a9a9a; --acc:#ff5500; --card:#1d1d1d; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui, sans-serif; }
+main { max-width: 720px; margin: 0 auto; padding: 20px; }
+header { display:flex; gap:10px; align-items:center; margin-bottom:16px; }
+h1 { margin:0 auto 0 0; font-size:22px; }
+.pill { background:var(--card); border-radius:999px; padding:4px 12px; font-size:14px; color:var(--mut); }
+.pill.ok { color:#6fe38a; } .pill.bad { color:#ff7a6b; }
+#now { background:var(--card); border-radius:12px; padding:16px; margin-bottom:12px; }
+#title { font-size:20px; font-weight:600; overflow-wrap:anywhere; }
+#artist { color:var(--mut); margin-top:2px; }
+#playerbox iframe { width:100%; height:166px; border:0; border-radius:12px; background:var(--card); }
+.controls { display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+button { min-height:48px; padding:0 20px; border:0; border-radius:10px; background:var(--acc); color:#fff; font-size:16px; cursor:pointer; }
+input[type=range] { width:180px; height:32px; vertical-align:middle; }
+#msg { color:#ffb86b; min-height:1.4em; } .small { color:var(--mut); font-size:12px; }

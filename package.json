@@ -1,13 +1,24 @@
 {
   "name": "soundcloud-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Schlanke SoundCloud-Desktop-App (Electron) für Linux und Windows",
   "main": "main.js",
-  "author": "you",
+  "homepage": "https://github.com/jesajaw/soundcloud",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jesajaw/soundcloud.git"
+  },
+  "author": {
+    "name": "jesajaw",
+    "email": "JesajaWeintritt@outlook.de"
+  },
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder"
+    "dev": "electron . --dev",
+    "relay": "node jam/relay.js",
+    "test": "node --test",
+    "dist": "electron-builder --publish never"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -16,11 +27,14 @@
   "build": {
     "appId": "local.soundcloud.desktop",
     "productName": "SoundCloud Desktop",
-    "files": ["main.js", "package.json", "icon.png"],
+    "files": ["main.js", "preload.js", "package.json", "icon.png", "lib/**", "jam/**"],
+    "protocols": [{ "name": "SoundCloud Jam", "schemes": ["scjam"] }],
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "AudioVideo",
-      "icon": "icon.png"
+      "icon": "icon.png",
+      "maintainer": "jesajaw <JesajaWeintritt@outlook.de>",
+      "synopsis": "SoundCloud-Desktop-App"
     },
     "win": {
       "target": ["nsis", "portable"],
