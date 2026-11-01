@@ -1,194 +1,83 @@
-// Jam-Relay: verteilt den Wiedergabestatus (Track-Link, Position, Play/Pause) vom Host an die Gäste.
-// Es wird KEIN Audio übertragen - jeder Gast spielt den Track über seinen eigenen SoundCloud-Zugang.
-// Keine Abhängigkeiten (nur Node-http, Server-Sent-Events). Läuft eingebettet in der App oder allein:
-//   node jam/relay.js --port 8787 --host 0.0.0.0
+// Jam relay: forwards "what is the host playing" (track link, position, play/pause) to guests. No audio.
+// Also serves the guest page, so the invite link is just a web link:  node jam/relay.js [port]
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
-const MAX_BODY = 16 * 1024;
+const rand = (n) => crypto.randomBytes(n).toString('base64url');
+const soundcloud = (u) => { try { const x = new URL(u); return x.protocol === 'https:' && /(^|\.)soundcloud\.com$/.test(x.hostname) ? x.origin + x.pathname : null; } catch { return null; } };
 
-const isScHost = (h) => h === 'soundcloud.com' || h.endsWith('.soundcloud.com');
+function createRelay() {
+  const rooms = new Map(); // id -> { token, state, clients, at }
+  const json = (res, code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
+  const file = (res, name, type) => { res.writeHead(200, { 'Content-Type': type + '; charset=utf-8' }); res.end(fs.readFileSync(path.join(__dirname, name))); };
+  const send = (res, ev, d) => res.write(`event: ${ev}\ndata: ${JSON.stringify(d)}\n\n`);
 
-// Prüft/säubert den vom Host gemeldeten Status. Gibt null bei ungültigen Daten zurück.
-function cleanState(b) {
-  if (!b || typeof b !== 'object') return null;
-  const num = (v, max) => (typeof v === 'number' && isFinite(v) ? Math.min(Math.max(v, 0), max) : null);
-  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
-  let track = null;
-  if (b.track != null) {
-    if (typeof b.track !== 'object') return null;
-    let u;
-    try { u = new URL(String(b.track.url)); } catch { return null; }
-    if (u.protocol !== 'https:' || !isScHost(u.hostname) || u.pathname.length > 300) return null;
-    track = {
-      url: u.origin + u.pathname,           // Query/Hash bewusst weg
-      title: str(b.track.title, 200),
-      artist: str(b.track.artist, 200),
-      duration: num(b.track.duration, 86400)
-    };
-  }
-  const position = num(b.position, 86400);
-  if (position === null) return null;
-  return { track, playing: b.playing === true, position };
-}
-
-function createRelay(opts = {}) {
-  const maxRooms = opts.maxRooms ?? 100;
-  const maxListeners = opts.maxListeners ?? 50;
-  const idleMs = opts.idleMs ?? 6 * 3600 * 1000;
-  const rooms = new Map();         // id -> {hostHash, state, seq, listeners:Set<res>, touched}
-  const createLog = new Map();     // ip -> [timestamps] (Rate-Limit für neue Räume)
-
-  const hash = (s) => crypto.createHash('sha256').update(String(s)).digest();
-  const cors = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS'
-  };
-  const json = (res, code, obj) => {
-    res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors });
-    res.end(JSON.stringify(obj));
-  };
-  const send = (res, event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  const broadcast = (room, event, data) => { for (const r of room.listeners) send(r, event, data); };
-
-  const authed = (req, room) => {
-    const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
-    return !!m && crypto.timingSafeEqual(hash(m[1]), room.hostHash);
-  };
-
-  function readBody(req, res) {
-    return new Promise((resolve, reject) => {
-      let size = 0, tooBig = false; const chunks = [];
-      req.on('data', (c) => {
-        size += c.length;
-        if (tooBig) return;
-        if (size > MAX_BODY) {
-          tooBig = true; chunks.length = 0;
-          // erst antworten, dann die Verbindung kappen
-          res.once('finish', () => req.destroy());
-          res.setHeader('Connection', 'close');
-          reject(Object.assign(new Error('too large'), { code: 413 }));
-          return;
-        }
-        chunks.push(c);
-      });
-      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-      req.on('error', reject);
-    });
-  }
-
-  function closeRoom(id, reason) {
+  const server = http.createServer((req, res) => {
+    const [, a, id, c] = new URL(req.url, 'http://x').pathname.split('/');
     const room = rooms.get(id);
-    if (!room) return;
-    broadcast(room, 'end', { reason });
-    for (const r of room.listeners) r.end();
-    rooms.delete(id);
-  }
+    const authed = room && req.headers.authorization === 'Bearer ' + room.token;
+    const get = req.method === 'GET';
 
-  async function handle(req, res) {
-    const url = new URL(req.url, 'http://relay.local');
-    const parts = url.pathname.split('/').filter(Boolean);
-    if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
-
-    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true, rooms: rooms.size });
-    if (req.method === 'GET' && url.pathname === '/time') return json(res, 200, { now: Date.now() });
-
-    if (req.method === 'POST' && url.pathname === '/rooms') {
-      const ip = req.socket.remoteAddress || '?';
-      const now = Date.now();
-      const log = (createLog.get(ip) || []).filter((t) => now - t < 60000);
-      if (log.length >= 10) return json(res, 429, { error: 'zu viele Räume, bitte kurz warten' });
-      if (rooms.size >= maxRooms) return json(res, 503, { error: 'Relay ist voll' });
-      log.push(now); createLog.set(ip, log);
-      const id = crypto.randomBytes(12).toString('base64url');
-      const hostToken = crypto.randomBytes(24).toString('base64url');
-      rooms.set(id, { hostHash: hash(hostToken), state: null, seq: 0, listeners: new Set(), touched: now });
-      return json(res, 201, { room: id, hostToken });
+    if (get && a === 'guest.js') return file(res, 'guest.js', 'text/javascript');
+    if (get && a === 'time') return json(res, 200, { now: Date.now() });
+    if (get && a && a !== 'rooms' && !id) return rooms.has(a) ? file(res, 'guest.html', 'text/html') : json(res, 404, { error: 'no such room' });
+    if (req.method === 'POST' && a === 'rooms' && !id) {
+      if (rooms.size >= 50) return json(res, 503, { error: 'relay is full' });
+      const rid = rand(12), r = { token: rand(24), state: null, clients: new Set(), at: Date.now() };
+      rooms.set(rid, r);
+      return json(res, 201, { room: rid, token: r.token });
     }
+    if (a !== 'rooms' || !room) return json(res, 404, { error: 'not found' });
 
-    if (parts[0] !== 'rooms' || !parts[1]) return json(res, 404, { error: 'not found' });
-    const id = parts[1];
-    const room = rooms.get(id);
-    if (!room) return json(res, 404, { error: 'Raum existiert nicht (mehr)' });
-
-    if (req.method === 'GET' && parts.length === 2) return json(res, 200, { room: id, listeners: room.listeners.size, live: !!room.state });
-
-    if (req.method === 'GET' && parts[2] === 'events') {
-      if (room.listeners.size >= maxListeners) return json(res, 503, { error: 'Raum ist voll' });
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive', 'X-Accel-Buffering': 'no', ...cors
-      });
-      res.write('retry: 3000\n\n');
-      room.listeners.add(res);
-      send(res, 'hello', { state: room.state, listeners: room.listeners.size, serverTime: Date.now() });
-      broadcast(room, 'listeners', { listeners: room.listeners.size });
-      req.on('close', () => {
-        room.listeners.delete(res);
-        broadcast(room, 'listeners', { listeners: room.listeners.size });
+    if (get && c === 'events') { // guests: server-sent events
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      room.clients.add(res);
+      send(res, 'hello', { state: room.state });
+      req.on('close', () => room.clients.delete(res));
+      return;
+    }
+    if (!authed) return json(res, 401, { error: 'unauthorized' });
+    if (req.method === 'DELETE' && !c) {
+      for (const r of room.clients) { send(r, 'end', {}); r.end(); }
+      rooms.delete(id);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'PUT' && c === 'state') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 8192) req.destroy(); });
+      req.on('end', () => {
+        let s; try { s = JSON.parse(body); } catch {}
+        const url = s && s.track ? soundcloud(s.track.url) : null;
+        if (!s || (s.track && !url) || !Number.isFinite(s.position)) return json(res, 400, { error: 'bad state' });
+        const str = (v) => String(v || '').slice(0, 200);
+        room.at = Date.now();
+        room.state = { track: url && { url, title: str(s.track.title), artist: str(s.track.artist), duration: Number(s.track.duration) || 0 },
+                       playing: s.playing === true, position: Math.max(0, s.position), serverTime: Date.now() };
+        for (const r of room.clients) send(r, 'state', room.state);
+        json(res, 200, { listeners: room.clients.size });
       });
       return;
     }
-
-    if (req.method === 'PUT' && parts[2] === 'state') {
-      if (!authed(req, room)) return json(res, 401, { error: 'unauthorized' });
-      let body;
-      try { body = JSON.parse(await readBody(req, res)); }
-      catch (e) { return json(res, e.code === 413 ? 413 : 400, { error: 'ungültiger Body' }); }
-      const clean = cleanState(body);
-      if (!clean) return json(res, 400, { error: 'ungültiger Status' });
-      room.seq += 1;
-      room.touched = Date.now();
-      room.state = { ...clean, seq: room.seq, serverTime: Date.now() };
-      broadcast(room, 'state', room.state);
-      return json(res, 200, { listeners: room.listeners.size, serverTime: room.state.serverTime });
-    }
-
-    if (req.method === 'DELETE' && parts.length === 2) {
-      if (!authed(req, room)) return json(res, 401, { error: 'unauthorized' });
-      closeRoom(id, 'host-closed');
-      return json(res, 200, { ok: true });
-    }
-    return json(res, 404, { error: 'not found' });
-  }
-
-  const server = http.createServer((req, res) => {
-    handle(req, res).catch(() => { if (!res.headersSent) json(res, 500, { error: 'internal' }); else res.end(); });
+    json(res, 404, { error: 'not found' });
   });
 
-  const heartbeat = setInterval(() => {
-    const now = Date.now();
-    for (const [id, room] of rooms) {
-      for (const r of room.listeners) r.write(': ping\n\n');
-      if (!room.listeners.size && now - room.touched > idleMs) rooms.delete(id);
-    }
-    for (const [ip, log] of createLog) if (!log.some((t) => now - t < 60000)) createLog.delete(ip);
+  const tick = setInterval(() => { // keep connections alive, drop abandoned rooms
+    for (const [id, r] of rooms) { for (const c of r.clients) c.write(': ping\n\n'); if (!r.clients.size && Date.now() - r.at > 6 * 3600e3) rooms.delete(id); }
   }, 15000);
-  heartbeat.unref();
+  tick.unref();
 
   return {
-    server,
-    rooms,
-    listen: (port = 8787, host = '0.0.0.0') => new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, host, () => { server.off('error', reject); resolve(server.address().port); });
-    }),
-    close: () => new Promise((resolve) => {
-      clearInterval(heartbeat);
-      for (const id of [...rooms.keys()]) closeRoom(id, 'relay-closed');
-      server.close(() => resolve());
-      server.closeAllConnections?.();
+    listen: (port = 8787, host = '0.0.0.0') => new Promise((ok, fail) => { server.once('error', fail); server.listen(port, host, () => ok(server.address().port)); }),
+    close: () => new Promise((ok) => {
+      clearInterval(tick);
+      for (const r of rooms.values()) for (const c of r.clients) c.end();
+      server.close(ok); server.closeAllConnections();
     })
   };
 }
 
-module.exports = { createRelay, cleanState };
+module.exports = { createRelay };
 
-if (require.main === module) {
-  const arg = (n, d) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : d; };
-  const relay = createRelay();
-  relay.listen(Number(arg('--port', 8787)), arg('--host', '0.0.0.0'))
-    .then((p) => console.log(`Jam-Relay läuft auf Port ${p}`))
-    .catch((e) => { console.error(e.message); process.exit(1); });
-}
+if (require.main === module) createRelay().listen(Number(process.argv[2]) || 8787).then((p) => console.log('Jam relay on port ' + p));

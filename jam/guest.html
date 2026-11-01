@@ -1,34 +1,12 @@
 <!doctype html>
-<html lang="de">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self' https://w.soundcloud.com; style-src 'self'; img-src data:; frame-src https://w.soundcloud.com; connect-src http: https:">
-  <title>SoundCloud Jam</title>
-  <link rel="stylesheet" href="guest.css">
-</head>
-<body>
-  <main>
-    <header>
-      <h1>Jam</h1>
-      <span id="status" class="pill">verbinde …</span>
-      <span id="listeners" class="pill"></span>
-    </header>
-    <section id="now">
-      <div id="title">Warte auf den Host …</div>
-      <div id="artist"></div>
-    </section>
-    <div id="playerbox"></div>
-    <div class="controls">
-      <button id="resync" type="button">Neu synchronisieren</button>
-      <label>Lautstärke <input id="vol" type="range" min="0" max="100" value="80"></label>
-    </div>
-    <p id="msg" role="status"></p>
-    <p id="drift" class="small"></p>
-  </main>
-  <script src="https://w.soundcloud.com/player/api.js"></script>
-  <script src="sync.js"></script>
-  <script src="guest.js"></script>
-</body>
-</html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://w.soundcloud.com; style-src 'unsafe-inline'; frame-src https://w.soundcloud.com; connect-src 'self'">
+<title>SoundCloud Jam</title>
+<style>body{font:16px system-ui;background:#121212;color:#eee;max-width:700px;margin:auto;padding:20px}button{font:inherit;padding:12px 20px;border:0;border-radius:8px;background:#f50;color:#fff}iframe{width:100%;height:166px;border:0}</style>
+<h2>SoundCloud Jam <small id="status"></small></h2>
+<button id="join">Join</button> <button id="follow" hidden>Following</button>
+<p id="title"></p>
+<div id="box"></div>
+<script src="https://w.soundcloud.com/player/api.js"></script>
+<script src="guest.js"></script>
